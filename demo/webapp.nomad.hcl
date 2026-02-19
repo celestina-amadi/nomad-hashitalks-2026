@@ -148,19 +148,19 @@ job "webapp" {
 
             <section class="api-demo">
                 <h2>API Status</h2>
-                <p>Backend API running at: <a href="http://localhost:8081">localhost:8081</a></p>
+                <p>Backend API routed via Traefik at: <a href="/api">/api</a></p>
                 <pre id="api-response">Loading...</pre>
             </section>
         </main>
 
         <footer>
-            <p>HashiTalks 2025 | Powered by HashiCorp Nomad</p>
-            <p><a href="http://localhost:4646">Open Nomad UI</a></p>
+            <p>HashiTalks 2026 | Powered by HashiCorp Nomad</p>
+            <p><a href="http://141.147.117.175:4646">Open Nomad UI</a></p>
         </footer>
     </div>
 
     <script>
-        fetch('http://localhost:8081')
+        fetch('/api')
             .then(r => r.text())
             .then(data => {
                 document.getElementById('api-response').textContent = data;
