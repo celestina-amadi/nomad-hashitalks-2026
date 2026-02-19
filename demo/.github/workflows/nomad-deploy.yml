@@ -1,0 +1,105 @@
+# =============================================================================
+# GitHub Actions - Nomad Job CI/CD Pipeline
+# =============================================================================
+# Validates and deploys all Nomad job files on every push/PR to main.
+#
+# Required GitHub Secrets:
+#   NOMAD_ADDR - Nomad cluster URL (e.g. http://public-ip:4646)
+# =============================================================================
+
+name: Nomad Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'demo/*.nomad.hcl'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'demo/*.nomad.hcl'
+
+env:
+  NOMAD_ADDR: ${{ secrets.NOMAD_ADDR }}
+
+jobs:
+  # ===========================================================================
+  # Validate - runs on every push and PR
+  # ===========================================================================
+  validate:
+    name: Validate Job Files
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Nomad
+        run: |
+          curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+          sudo apt-get update && sudo apt-get install -y nomad
+
+      - name: Validate all job files
+        run: |
+          echo "Validating Nomad job files..."
+          FAILED=0
+          for file in demo/*.nomad.hcl; do
+            echo "--- Validating: $file ---"
+            if nomad job validate "$file"; then
+              echo "PASS: $file"
+            else
+              echo "FAIL: $file"
+              FAILED=1
+            fi
+            echo ""
+          done
+          if [ $FAILED -eq 1 ]; then
+            echo "Some job files failed validation!"
+            exit 1
+          fi
+          echo "All job files are valid!"
+
+      - name: Plan jobs (preview changes)
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "Planning Nomad job changes..."
+          for file in demo/*.nomad.hcl; do
+            echo "=== Plan: $file ==="
+            nomad job plan "$file" || true
+            echo ""
+          done
+
+  # ===========================================================================
+  # Deploy - runs on push to main, deploys ALL job files
+  # ===========================================================================
+  deploy:
+    name: Deploy to Nomad
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Nomad
+        run: |
+          curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+          sudo apt-get update && sudo apt-get install -y nomad
+
+      - name: Deploy all jobs
+        run: |
+          echo "Deploying all jobs to Nomad cluster..."
+          echo "Cluster: $NOMAD_ADDR"
+          echo ""
+          for file in demo/*.nomad.hcl; do
+            echo "=== Deploying: $file ==="
+            nomad job run "$file"
+            echo ""
+          done
+          echo "Deployment complete!"
+
+      - name: Verify deployments
+        run: |
+          echo "Current jobs on cluster:"
+          nomad job status
