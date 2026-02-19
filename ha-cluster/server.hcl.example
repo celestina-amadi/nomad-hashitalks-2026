@@ -1,0 +1,92 @@
+# =============================================================================
+# NOMAD SERVER CONFIGURATION TEMPLATE
+# =============================================================================
+# Copy this file to /etc/nomad.d/nomad.hcl on EACH server.
+# Change the values marked CHANGE_ME for each server.
+#
+# You need 3 servers for HA. Each server gets a copy of this file
+# with its own name and IP address.
+#
+# EXAMPLE IPs (replace with your actual private IPs):
+#   Server 1: 10.0.1.10
+#   Server 2: 10.0.1.11
+#   Server 3: 10.0.1.12
+# =============================================================================
+
+# CHANGE_ME: Unique name for this node (e.g., "server-1", "server-2", "server-3")
+name = "server-1"
+
+# Where Nomad persists Raft logs, cluster state, and snapshots
+data_dir = "/opt/nomad/data"
+
+# Accept connections on all network interfaces
+bind_addr = "0.0.0.0"
+
+# CHANGE_ME: Addresses this server advertises to the cluster
+# Use PRIVATE IPs (not public) - faster, free, and more secure
+advertise {
+  http = "10.0.1.10:4646"  # Port 4646 = HTTP API and Web UI
+  rpc  = "10.0.1.10:4647"  # Port 4647 = Server-to-server and client-to-server RPC
+  serf = "10.0.1.10:4648"  # Port 4648 = Gossip protocol (cluster membership)
+}
+
+# Server mode - makes this node part of the control plane
+server {
+  enabled = true  # Run as a server (handles scheduling and state)
+
+  # Total number of servers expected in the cluster
+  # Nomad waits for this many before electing a leader
+  # Must be odd: 3 (tolerates 1 failure) or 5 (tolerates 2 failures)
+  bootstrap_expect = 3
+
+  # Raft consensus protocol version (3 = current recommended)
+  raft_protocol = 3
+
+  # How servers discover each other
+  server_join {
+    # CHANGE_ME: Private IPs of ALL servers in the cluster
+    retry_join = ["10.0.1.10:4648", "10.0.1.11:4648", "10.0.1.12:4648"]
+  }
+}
+
+# Client mode - allows this server to also run workloads (optional)
+# Remove this block for dedicated server-only nodes
+client {
+  enabled = true  # Set to false for server-only nodes
+
+  # CHANGE_ME: List of all server RPC addresses
+  servers = ["10.0.1.10:4647", "10.0.1.11:4647", "10.0.1.12:4647"]
+
+  # Optional: metadata tags for this node (useful for job constraints)
+  # meta {
+  #   "cloud"             = "oci"
+  #   "availability_domain" = "AD-1"
+  #   "role"              = "worker"
+  # }
+}
+
+# Datacenter name - jobs target this in their 'datacenters' field
+# Change to match your environment (e.g., "oci-ashburn", "aws-us-east-1")
+datacenter = "dc1"
+
+# Region for multi-cluster federation ("global" is default)
+region = "global"
+
+# Log verbosity: TRACE, DEBUG, INFO, WARN, ERROR
+log_level = "INFO"
+
+# Log file path (ensure the directory exists)
+log_file = "/var/log/nomad/nomad.log"
+
+# Enable the built-in Web UI
+ui {
+  enabled = true  # Access at http://<server-ip>:4646
+}
+
+# Prometheus metrics endpoint at /v1/metrics
+telemetry {
+  prometheus_metrics         = true  # Enable /v1/metrics for Prometheus scraping
+  disable_hostname           = true  # Cleaner metric names without hostname prefix
+  publish_allocation_metrics = true  # Per-allocation CPU, memory, etc.
+  publish_node_metrics       = true  # Per-node resource usage
+}

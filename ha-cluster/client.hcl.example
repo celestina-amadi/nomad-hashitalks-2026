@@ -1,0 +1,70 @@
+# =============================================================================
+# NOMAD CLIENT (WORKER) CONFIGURATION
+# =============================================================================
+# Use this for dedicated worker nodes that only run workloads.
+# Clients don't participate in scheduling - they receive work from servers.
+#
+# CHANGE_ME: Update server IPs to match your cluster.
+# =============================================================================
+
+# Unique name for this client node
+name = "client1"  # CHANGE_ME: Use a unique name per client
+
+# Where Nomad stores allocation data and task state
+data_dir = "/opt/nomad/data"
+
+# Accept connections on all network interfaces
+bind_addr = "0.0.0.0"
+
+# Disable server mode - this node only runs workloads
+server {
+  enabled = false  # Client-only node (no scheduling responsibilities)
+}
+
+# Client mode configuration
+client {
+  enabled = true  # This node can receive and run jobs
+
+  # CHANGE_ME: List of server RPC addresses (use private IPs)
+  servers = ["10.0.1.10:4647", "10.0.1.11:4647", "10.0.1.12:4647"]
+
+  # Metadata tags - used in job constraints to target specific nodes
+  # Example: constraint { attribute = "${meta.node_type}" value = "worker" }
+  meta {
+    "node_type" = "worker"       # Custom label for this node's role
+    "zone"      = "us-east-1a"   # Availability zone or location
+  }
+
+  # Host volumes - mount host directories into containers for persistent storage
+  # Jobs reference this by name: volume "data" { type = "host" source = "data" }
+  host_volume "data" {
+    path      = "/opt/nomad/volumes/data"  # Directory on the host machine
+    read_only = false                       # Allow containers to write
+  }
+}
+
+# Datacenter name - must match what servers and jobs use
+datacenter = "dc1"
+
+# Region for federation
+region = "global"
+
+# Log verbosity
+log_level = "INFO"
+
+# Docker driver settings - how Nomad runs Docker containers
+plugin "docker" {
+  config {
+    allow_privileged = false  # Block privileged containers (security best practice)
+
+    # Add Nomad metadata as Docker labels on containers
+    extra_labels = ["job_name", "task_group_name", "task_name", "node_name"]
+  }
+}
+
+# raw_exec driver - runs binaries directly on the host (no isolation)
+plugin "raw_exec" {
+  config {
+    enabled = false  # Disabled by default - enable only if you trust all job submitters
+  }
+}

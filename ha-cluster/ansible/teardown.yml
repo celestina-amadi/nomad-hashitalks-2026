@@ -1,0 +1,85 @@
+# =============================================================================
+# Ansible Playbook - Nomad HA Cluster Teardown
+# =============================================================================
+# Reverses what playbook.yml did so you can rerun the setup live in a demo.
+# Keeps Docker installed (slow to reinstall). Does NOT delete the nomad user.
+#
+# Usage:
+#   ansible-playbook -i inventory.ini teardown.yml
+# =============================================================================
+
+---
+- name: Teardown Nomad HA Cluster
+  hosts: nomad_servers
+  become: true
+
+  tasks:
+    # =========================================================================
+    # Step 1: Stop and disable Nomad
+    # =========================================================================
+    - name: Stop and disable Nomad service
+      systemd:
+        name: nomad
+        state: stopped
+        enabled: false
+      ignore_errors: true   # OK if service doesn't exist yet
+
+    # =========================================================================
+    # Step 2: Remove systemd service file
+    # =========================================================================
+    - name: Remove Nomad systemd service file
+      file:
+        path: /etc/systemd/system/nomad.service
+        state: absent
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: true
+
+    # =========================================================================
+    # Step 3: Remove Nomad configuration
+    # =========================================================================
+    - name: Remove Nomad config file
+      file:
+        path: /etc/nomad.d/nomad.hcl
+        state: absent
+
+    # =========================================================================
+    # Step 4: Clear Nomad data (cluster state, allocations, raft logs)
+    # =========================================================================
+    - name: Clear Nomad data directory
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /opt/nomad/data
+        - /opt/nomad/alloc_mounts
+        - /var/log/nomad
+
+    # =========================================================================
+    # Step 5: Uninstall Nomad binary
+    # =========================================================================
+    - name: Uninstall Nomad package
+      apt:
+        name: nomad
+        state: absent
+        purge: true
+
+    # =========================================================================
+    # Step 6: Remove iptables rules added for Nomad ports
+    # =========================================================================
+    - name: Remove Nomad iptables rules
+      shell: |
+        iptables -D INPUT -p tcp --dport 4646 -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p tcp --dport 4647 -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p tcp --dport 4648 -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p udp --dport 4648 -j ACCEPT 2>/dev/null || true
+      changed_when: false
+
+    - name: Save iptables rules
+      shell: iptables-save > /etc/iptables/rules.v4
+      ignore_errors: true
+
+    - name: Teardown complete
+      debug:
+        msg: "Nomad removed. Run playbook.yml to set it up again."

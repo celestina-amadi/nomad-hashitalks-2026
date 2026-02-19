@@ -1,0 +1,22 @@
+[Unit]
+Description=HashiCorp Nomad
+Documentation=https://www.nomadproject.io/docs
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=notify
+User=nomad
+Group=nomad
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStart=/usr/bin/nomad agent -config=/etc/nomad.d/
+KillMode=process
+KillSignal=SIGINT
+LimitNOFILE=65536
+LimitNPROC=infinity
+Restart=on-failure
+RestartSec=2
+
+[Install]
+# Start Nomad when the system boots
+WantedBy=multi-user.target

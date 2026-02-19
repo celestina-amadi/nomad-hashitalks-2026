@@ -1,0 +1,238 @@
+# =============================================================================
+# Ansible Playbook - Nomad HA Cluster Setup
+# =============================================================================
+# Sets up a 3-node Nomad cluster on Ubuntu/Debian servers.
+# Installs Nomad, Docker, configures the cluster, and starts the service.
+#
+# Usage:
+#   ansible-playbook -i inventory.ini playbook.yml
+#
+# Dry run (no changes):
+#   ansible-playbook -i inventory.ini playbook.yml --check
+# =============================================================================
+
+---
+- name: Setup Nomad HA Cluster
+  hosts: nomad_servers        # Target all servers defined in inventory.ini
+  become: true                # Run tasks as root (sudo)
+
+  tasks:
+    # =========================================================================
+    # Step 1: Install prerequisites
+    # =========================================================================
+    - name: Install required packages for adding APT repositories
+      apt:
+        name:
+          - gnupg                        # For GPG key handling
+          - software-properties-common   # For apt-add-repository
+          - curl                         # For downloading files
+        state: present                   # Install if not already present
+        update_cache: true               # Run apt-get update first
+
+    # =========================================================================
+    # Step 2: Install Nomad
+    # =========================================================================
+    - name: Download HashiCorp GPG key
+      get_url:
+        url: https://apt.releases.hashicorp.com/gpg
+        dest: /tmp/hashicorp.gpg
+        mode: '0644'
+
+    - name: Convert HashiCorp key to keyring format
+      command: gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg /tmp/hashicorp.gpg
+      args:
+        creates: /usr/share/keyrings/hashicorp-archive-keyring.gpg
+
+    - name: Add HashiCorp APT repository
+      apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com {{ ansible_facts['distribution_release'] }} main"
+        state: present
+        filename: hashicorp
+
+    - name: Install Nomad
+      apt:
+        name: nomad
+        state: present
+        update_cache: true
+
+    - name: Verify Nomad installation
+      command: nomad version
+      register: nomad_version            # Save output to a variable
+      changed_when: false                # This task doesn't change anything
+
+    - name: Show Nomad version
+      debug:
+        msg: "{{ nomad_version.stdout }}"  # Print the installed version
+
+    # =========================================================================
+    # Step 3: Install Docker (needed for Docker-based Nomad jobs)
+    # =========================================================================
+    - name: Add Docker GPG key
+      shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+          gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/docker-archive-keyring.gpg  # Skip if already exists
+
+    - name: Add Docker APT repository
+      apt_repository:
+        repo: "deb [arch={{ ansible_facts['architecture'] | replace('x86_64', 'amd64') | replace('aarch64', 'arm64') }} signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu {{ ansible_facts['distribution_release'] }} stable"
+        state: present
+        filename: docker
+
+    - name: Install Docker
+      apt:
+        name:
+          - docker-ce                    # Docker Engine
+          - docker-ce-cli                # Docker CLI
+          - containerd.io                # Container runtime
+        state: present
+        update_cache: true
+
+    - name: Enable and start Docker service
+      systemd:
+        name: docker
+        enabled: true                    # Start on boot
+        state: started                   # Start now if not running
+
+    # =========================================================================
+    # Step 4: Create nomad system user
+    # =========================================================================
+    - name: Create nomad system user (security best practice - don't run as root)
+      user:
+        name: nomad
+        system: true                     # System user (no home dir, no login)
+        home: /etc/nomad.d
+        shell: /bin/false                # Cannot log in interactively
+        create_home: false
+
+    - name: Add nomad user to docker group (so it can run containers)
+      user:
+        name: nomad
+        groups: docker
+        append: true                     # Add to docker group without removing other groups
+
+    # =========================================================================
+    # Step 5: Create Nomad directories
+    # =========================================================================
+    - name: Create Nomad directories with correct ownership
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: nomad
+        group: nomad
+        mode: '0755'
+        recurse: true
+      loop:
+        - /opt/nomad/data
+        - /etc/nomad.d
+        - /opt/nomad/data/client
+        - /opt/nomad/alloc_mounts
+        - /var/log/nomad
+
+    # =========================================================================
+    # Step 6: Generate Nomad configuration (per-server, using template)
+    # =========================================================================
+    - name: Deploy Nomad configuration from template
+      template:
+        src: templates/nomad.hcl.j2      # Jinja2 template with server-specific IPs
+        dest: /etc/nomad.d/nomad.hcl     # Where Nomad reads its config
+        owner: nomad
+        group: nomad
+        mode: '0640'                     # Only nomad user can read (contains cluster info)
+      notify: Restart Nomad              # Restart Nomad if config changes
+
+    # =========================================================================
+    # Step 7: Install systemd service
+    # =========================================================================
+    - name: Deploy Nomad systemd service file
+      template:
+        src: templates/nomad.service.j2
+        dest: /etc/systemd/system/nomad.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart Nomad
+
+    - name: Reload systemd daemon (pick up new/changed service files)
+      systemd:
+        daemon_reload: true
+
+    # =========================================================================
+    # Step 8: Fix iptables rules (OCI Ubuntu has a REJECT-all rule)
+    # =========================================================================
+    # OCI Ubuntu images have iptables rules that REJECT all traffic except SSH.
+    # The default rule order is:
+    #   1. ACCEPT RELATED,ESTABLISHED
+    #   4. ACCEPT SSH (port 22)
+    #   5. REJECT ALL  <-- blocks everything else!
+    # We need to INSERT Nomad port rules BEFORE the REJECT rule.
+    - name: Remove any existing Nomad iptables rules (cleanup duplicates)
+      shell: |
+        iptables -D INPUT -p tcp --dport 4646 -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p tcp --dport 4647 -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p tcp --dport 4648 -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p udp --dport 4648 -j ACCEPT 2>/dev/null || true
+      changed_when: false
+
+    - name: Find the REJECT rule position in iptables
+      shell: iptables -L INPUT --line-numbers -n | grep REJECT | head -1 | awk '{print $1}'
+      register: reject_line
+      changed_when: false
+
+    - name: Insert Nomad port rules BEFORE the REJECT rule
+      shell: |
+        POS={{ reject_line.stdout | default('5') }}
+        iptables -I INPUT $POS -p tcp --dport 4646 -j ACCEPT
+        iptables -I INPUT $((POS+1)) -p tcp --dport 4647 -j ACCEPT
+        iptables -I INPUT $((POS+2)) -p tcp --dport 4648 -j ACCEPT
+        iptables -I INPUT $((POS+3)) -p udp --dport 4648 -j ACCEPT
+      when: reject_line.stdout | length > 0
+
+    - name: Save iptables rules so they persist after reboot
+      shell: iptables-save > /etc/iptables/rules.v4
+      ignore_errors: true
+
+    # =========================================================================
+    # Step 9:  start Nomad 
+    # =========================================================================
+
+    - name: Enable and start Nomad service
+      systemd:
+        name: nomad
+        enabled: true                    # Start on boot
+        state: started                   # Start now
+
+    # =========================================================================
+    # Step 10: Verify cluster formation
+    # =========================================================================
+    - name: Wait for Nomad to be ready (API responding)
+      uri:
+        url: "http://{{ private_ip }}:4646/v1/agent/self"
+        status_code: 200
+      register: result
+      retries: 5                       # Try up to 5 times
+      delay: 5                           # Wait 5 seconds between retries
+      until: result.status == 200
+
+    - name: Wait until cluster leader is elected
+      command: nomad server members
+      register: members
+      retries: 10
+      delay: 5
+      until: "'true' in members.stdout"   # leader column shows true
+      run_once: true
+
+    - name: Show cluster status
+      debug:
+        msg: "{{ members.stdout_lines }}"
+      run_once: true
+
+  # ===========================================================================
+  # Handlers - triggered by "notify" in tasks above
+  # ===========================================================================
+  handlers:
+    - name: Restart Nomad
+      systemd:
+        name: nomad
+        state: restarted                 # Restart to pick up config changes
